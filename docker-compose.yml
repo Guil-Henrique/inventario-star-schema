@@ -1,0 +1,9 @@
+version: '3.8'
+
+services:
+  etl:
+    build: .
+    container_name: inventory_star_schema_etl
+    volumes:
+      - .:/app
+    command: python main.py
