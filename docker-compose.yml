@@ -1,9 +1,34 @@
-version: '3.8'
-
+version: '3'
 services:
-  etl:
+  web:
     build: .
-    container_name: inventory_star_schema_etl
+    container_name: etl_app
+    depends_on:
+      - db
+    environment:
+      - POSTGRES_DB=dbinventario
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=root
+    networks:
+      - etl_network
+
+  db:
+    image: postgres:13
+    container_name: postgres_db
+    environment:
+      POSTGRES_DB: dbinventario
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: root
+    ports:
+      - "5432:5432"
+    networks:
+      - etl_network
     volumes:
-      - .:/app
-    command: python main.py
+      - postgres_data:/var/lib/postgresql/data
+
+networks:
+  etl_network:
+    driver: bridge
+
+volumes:
+  postgres_data:
