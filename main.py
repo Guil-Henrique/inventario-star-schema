@@ -1,128 +1,147 @@
 import requests
 import psycopg2
 import json
-from psycopg2 import sql
 import time
 
-def get_data(url):
-    response = requests.get(url)
-    if response.status_code == 200:
-        return response.json()
-    else:
-        print(f"Erro ao obter dados da API: {response.status_code}")
-        return None
+## a tabela products tem paginação na api, percorri as pg utilizando while pra pegar todos
+def get_all_data(url, page_size=100, paginated=True):
+    all_data = []
+    page_number = 1
 
-def create_db_and_tables(conn):
-    cursor = conn.cursor()
+    while True:
+        if paginated:
+            response = requests.get(url, params={'PageNumber': page_number, 'PageSize': page_size})
+        else:
+            response = requests.get(url)  
 
-    #crirar as tables
-    queries = {
-        'ProductInventories': '''
-            CREATE TABLE IF NOT EXISTS ProductInventories (
-                id SERIAL PRIMARY KEY,
-                product_id INT,
-                location_id INT,
-                shelf VARCHAR(50),
-                bin INT,
-                quantity INT,
-                modified_date TIMESTAMP
-            );
-        ''',
-        'Product': '''
-            CREATE TABLE IF NOT EXISTS Product (
-                id SERIAL PRIMARY KEY,
-                product_id INT,
+        if response.status_code == 200:
+            data = response.json()
+            if not data:
+                break
+            all_data.extend(data)
+            print(f"log pagina: {page_number}: {len(data)}")
+            
+            if paginated:
+                page_number += 1
+            else:
+                break 
+        else:
+            ## print(f"erro: {response.status_code}")
+            break
+
+    return all_data
+
+## criaçao das tables
+def create_tables(conn):
+    with conn.cursor() as cur:
+
+        cur.execute(""" 
+                    
+            CREATE TABLE IF NOT EXISTS products (
+                product_id INT PRIMARY KEY,
                 name VARCHAR(255),
                 product_number VARCHAR(50),
-                is_manufactured BOOLEAN,
-                is_saleable BOOLEAN,
-                color VARCHAR(50),
                 safety_stock_level INT,
                 reorder_point INT,
                 standard_cost DECIMAL,
                 list_price DECIMAL,
-                size VARCHAR(50),
-                size_unit VARCHAR(50),
-                weight_unit VARCHAR(50),
-                weight DECIMAL,
-                days_to_manufacture INT,
-                product_line VARCHAR(50),
-                class VARCHAR(50),
-                style VARCHAR(50),
-                subcategory VARCHAR(50),
                 category VARCHAR(50),
-                model VARCHAR(50),
-                sell_start_date TIMESTAMP,
-                sell_end_date TIMESTAMP,
-                discontinued_date TIMESTAMP,
-                modified_date TIMESTAMP
+                subcategory VARCHAR(50)
             );
-        ''',
-        'Customer': '''
-            CREATE TABLE IF NOT EXISTS Customer (
-                id SERIAL PRIMARY KEY,
-                customer_id INT,
-                person_id INT,
-                store_id INT,
-                territory VARCHAR(255),
-                account_number VARCHAR(50),
-                modified_date TIMESTAMP
-            );
-        ''',
-        'SalesPerson': '''
-            CREATE TABLE IF NOT EXISTS SalesPerson (
-                id SERIAL PRIMARY KEY,
-                sales_person_id INT,
-                territory VARCHAR(255),
-                sales_quota DECIMAL,
-                bonus DECIMAL,
-                percent_commission DECIMAL,
-                sales_ytd DECIMAL,
-                sales_last_year DECIMAL,
-                modified_date TIMESTAMP
-            );
-        ''',
-        'Store': '''
-            CREATE TABLE IF NOT EXISTS Store (
-                id SERIAL PRIMARY KEY,
-                store_id INT,
+
+            CREATE TABLE IF NOT EXISTS locations (
+                location_id INT PRIMARY KEY,
                 name VARCHAR(255),
-                sales_person_id INT,
-                demographics JSONB,
-                modified_date TIMESTAMP
+                cost_rate DECIMAL
             );
-        '''
-    }
 
-    for table, query in queries.items():
-        cursor.execute(query)
-        print(f"Tabela {table} verificada/criada com sucesso.")
+            CREATE TABLE IF NOT EXISTS calendario (
+                date DATE PRIMARY KEY,
+                ano INT,
+                mes INT,
+                day INT
+            );
 
-    conn.commit()
+            CREATE TABLE IF NOT EXISTS product_inventories (
+                product_id INT,
+                location_id INT,
+                date DATE,
+                quantity INT,
+                PRIMARY KEY (product_id, location_id, date),
+                FOREIGN KEY (product_id) REFERENCES products(product_id) ON DELETE CASCADE,
+                FOREIGN KEY (location_id) REFERENCES locations(location_id) ON DELETE CASCADE,
+                FOREIGN KEY (date) REFERENCES calendario(date) ON DELETE CASCADE
+            );
 
+
+        """)
+        conn.commit()
+
+##
 def insert_data(conn, table_name, data):
     cursor = conn.cursor()
-
     if data:
         for item in data:
-            if table_name == 'Store' and 'demographics' in item:
-                item['demographics'] = json.dumps(item['demographics'])
-            
+            if table_name == 'product_inventories':
+                date_str = item['modifiedDate'].split('T')[0]
+                year, month, day = map(int, date_str.split('-'))
+
+                
+                cursor.execute("""
+                    INSERT INTO calendario (date, ano, mes, day)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (date) DO NOTHING;
+                """, (date_str, year, month, day))
+
+                item = {
+                    'product_id': item['productId'],
+                    'location_id': item['location']['locationId'],
+                    'quantity': item['quantity'],
+                    'date': date_str  
+                }
+            elif table_name == 'products':
+                item = {
+                    'product_id': item['productId'],
+                    'name': item['name'],
+                    'product_number': item['productNumber'],
+                    'safety_stock_level': item['safetyStockLevel'],
+                    'reorder_point': item['reorderPoint'],
+                    'standard_cost': item['standardCost'],
+                    'list_price': item['listPrice'],
+                    'category': item.get('category'),
+                    'subcategory': item.get('subcategory')
+                }
+            elif table_name == 'locations':
+                item = {
+                    'location_id': item['locationId'],
+                    'name': item['name'],
+                    'cost_rate': item['costRate']
+                }
+
             keys = item.keys()
             columns = ', '.join(keys)
             values = ', '.join([f"%({k})s" for k in keys])
-            query = f"INSERT INTO {table_name} ({columns}) VALUES ({values})"
+
+            if table_name == 'products':
+                query = f"INSERT INTO {table_name} ({columns}) VALUES ({values}) ON CONFLICT (product_id) DO NOTHING;"
+            elif table_name == 'locations':
+                query = f"INSERT INTO {table_name} ({columns}) VALUES ({values}) ON CONFLICT (location_id) DO NOTHING;"
+            elif table_name == 'product_inventories':
+                query = f"INSERT INTO {table_name} (product_id, location_id, quantity, date) VALUES (%(product_id)s, %(location_id)s, %(quantity)s, %(date)s) ON CONFLICT (product_id, location_id, date) DO NOTHING;"
+
             try:
                 cursor.execute(query, item)
             except Exception as e:
-                print(f"Erro ao inserir dados na tabela {table_name}: {e}")
-                conn.rollback() 
+                print(f"erro na tabela: {table_name}: {e}")
+                conn.rollback()
                 return
-        conn.commit()
-        print(f"Dados inseridos com sucesso na tabela {table_name}")
-    else:
-        print(f"Nenhum dado para inserir na tabela {table_name}")
 
+        conn.commit()
+        print(f"dados INSERIDOS {table_name}")
+    else:
+        print(f"dados NÃO INSERIDOS {table_name}")
+
+## db connection. POSTGRES 
 def connect_db(retries=5):
     conn = None
     while retries > 0:
@@ -134,8 +153,10 @@ def connect_db(retries=5):
                 host="db",
                 port="5432"
             )
-            print("Conectado ao banco de dados com sucesso!")
+
             return conn
+        
+        #Tentar reconectar ao banco de dados
         except Exception as e:
             print(f"Erro ao conectar ao banco de dados: {e}")
             retries -= 1
@@ -145,26 +166,36 @@ def connect_db(retries=5):
     print("Não foi possível conectar ao banco de dados após várias tentativas.")
     return None
 
+## tabelas utilizadas da api- star schema controle de estoque. apenas products com paginas
 urls = {
-    'ProductInventories': 'https://demodata.grapecity.com/adventureworks/api/v1/ProductInventories',
-    'Product': 'https://demodata.grapecity.com/adventureworks/api/v1/Products',
-    'Customer': 'https://demodata.grapecity.com/adventureworks/api/v1/Customers',
-    'SalesPerson': 'https://demodata.grapecity.com/adventureworks/api/v1/SalesPersons',
-    'Store': 'https://demodata.grapecity.com/adventureworks/api/v1/stores'
+    'product_inventories': 'https://demodata.grapecity.com/adventureworks/api/v1/ProductInventories',
+    'products': 'https://demodata.grapecity.com/adventureworks/api/v1/Products',
+    'locations': 'https://demodata.grapecity.com/adventureworks/api/v1/Locations'
 }
 
 def main():
     conn = connect_db()
     if conn:
-        create_db_and_tables(conn)
+        create_tables(conn) 
 
-        for table_name, url in urls.items():
-            data = get_data(url)
-            if data:
-                print(f"Dados obtidos para {table_name}: {data[:5]}") 
-                insert_data(conn, table_name, data)
+        data_products = get_all_data(urls['products'], paginated=True)
+        if data_products:
+            insert_data(conn, 'products', data_products)
+
+
+        data_locations = get_all_data(urls['locations'], paginated=False)
+        if data_locations:
+            print(f"Dados obtidos para locations: {len(data_locations)} registros")
+            insert_data(conn, 'locations', data_locations)
+
+
+        data_product_inventories = get_all_data(urls['product_inventories'], paginated=False)
+        if data_product_inventories:
+            print(f"Dados obtidos para product_inventories: {len(data_product_inventories)} registros")
+            insert_data(conn, 'product_inventories', data_product_inventories)
 
         conn.close()
 
 if __name__ == "__main__":
     main()
+
